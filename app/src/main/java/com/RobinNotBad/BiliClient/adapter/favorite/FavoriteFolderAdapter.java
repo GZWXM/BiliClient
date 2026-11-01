@@ -73,13 +73,18 @@ public class FavoriteFolderAdapter extends RecyclerView.Adapter<FavoriteFolderAd
                 return;
 
             holder.name.setText(StringUtil.htmlToString(folder.name));
-            holder.count.setText(folder.videoCount + "/" + folder.maxCount);
-            Glide.with(BiliTerminal.context).asDrawable().load(GlideUtil.url(folder.cover))
-                    .transition(GlideUtil.getTransitionOptions())
-                    .apply(RequestOptions.bitmapTransform(new RoundedCorners(ToolsUtil.dp2px(5))))
-                    .format(DecodeFormat.PREFER_RGB_565)
-                    .diskCacheStrategy(DiskCacheStrategy.NONE)
-                    .into(holder.cover);
+            // v3 接口不再返回收藏夹上限，没有上限时只显示数量
+            holder.count.setText(folder.maxCount > 0
+                    ? (folder.videoCount + "/" + folder.maxCount)
+                    : (folder.videoCount + " 个视频"));
+            if (folder.cover != null && !folder.cover.isEmpty()) {
+                Glide.with(BiliTerminal.context).asDrawable().load(GlideUtil.url(folder.cover))
+                        .transition(GlideUtil.getTransitionOptions())
+                        .apply(RequestOptions.bitmapTransform(new RoundedCorners(ToolsUtil.dp2px(5))))
+                        .format(DecodeFormat.PREFER_RGB_565)
+                        .diskCacheStrategy(DiskCacheStrategy.NONE)
+                        .into(holder.cover);
+            }
             holder.itemView.setOnClickListener(view -> {
                 Intent intent = new Intent();
                 intent.setClass(context, FavoriteVideoListActivity.class);
