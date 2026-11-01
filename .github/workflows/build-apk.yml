@@ -4,9 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [ develop ]
-    paths:
-      - 'app/**'
-      - '.github/workflows/build-apk.yml'
 
 jobs:
   build:
@@ -14,32 +11,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install SDK platform 32
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-32" "build-tools;32.0.0" "platform-tools" || true
+          SDKMANAGER=$(find $ANDROID_HOME/cmdline-tools -name sdkmanager -type f | head -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-32" "build-tools;32.0.0"
 
       - name: Build debug APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Show outputs
-        if: always()
-        run: find app/build/outputs -name "*.apk" -exec ls -lh {} \; || true
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: biliclient-apk
+          name: biliclient-debug
           path: app/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
