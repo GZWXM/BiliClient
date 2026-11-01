@@ -53,6 +53,8 @@ import com.RobinNotBad.BiliClient.adapter.QualitySelectorAdapter;
 import com.RobinNotBad.BiliClient.adapter.ViewPointAdapter;
 import com.RobinNotBad.BiliClient.api.ConfInfoApi;
 import com.RobinNotBad.BiliClient.api.DanmakuApi;
+import com.RobinNotBad.BiliClient.api.FavoriteApi;
+import com.RobinNotBad.BiliClient.api.HistoryApi;
 import com.RobinNotBad.BiliClient.api.InteractionVideoApi;
 import com.RobinNotBad.BiliClient.api.PlayerApi;
 import com.RobinNotBad.BiliClient.api.VideoInfoApi;
@@ -63,6 +65,8 @@ import com.RobinNotBad.BiliClient.model.InteractionVideoData;
 import com.RobinNotBad.BiliClient.model.PlayerData;
 import com.RobinNotBad.BiliClient.model.Subtitle;
 import com.RobinNotBad.BiliClient.model.SubtitleLink;
+import com.RobinNotBad.BiliClient.model.VideoCard;
+import com.RobinNotBad.BiliClient.model.VideoInfo;
 import com.RobinNotBad.BiliClient.model.ViewPoint;
 import com.RobinNotBad.BiliClient.ui.widget.BatteryView;
 import com.RobinNotBad.BiliClient.ui.widget.HighEnergyProgressBar;
@@ -184,6 +188,16 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
     private boolean loop_enabled;
     private boolean auto_next_enabled = false;
 
+    //收藏夹连播模式（由收藏夹视频列表启动）
+    private boolean favPlaylistMode = false;
+    private long favMid = 0, favFid = 0;
+    private String favFolderName = "";
+    private ArrayList<VideoCard> favPlaylist = null;
+    private int favIndex = 0;
+    private int favPage = 1;
+    private boolean favEnd = false;
+    private boolean favSwitching = false;
+
     private BatteryView batteryView;
     private BatteryManager batteryManager;
 
@@ -274,6 +288,22 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
             qnStrList = intent.getStringArrayExtra("qnStrList");
             qnValueList = intent.getIntArrayExtra("qnValueList");
             currentQuality = intent.getIntExtra("currentQuality", SharedPreferencesUtil.getInt("play_qn", 16));
+        }
+
+        //收藏夹连播：列表快照 + 当前序号 + 分页信息
+        if (intent.hasExtra("fav_playlist")) {
+            favPlaylist = intent.getParcelableArrayListExtra("fav_playlist");
+            if (favPlaylist != null && !favPlaylist.isEmpty()) {
+                favPlaylistMode = true;
+                favIndex = intent.getIntExtra("fav_index", 0);
+                favMid = intent.getLongExtra("fav_mid", 0);
+                favFid = intent.getLongExtra("fav_fid", 0);
+                favFolderName = intent.getStringExtra("fav_name");
+                if (favFolderName == null) favFolderName = "";
+                favPage = intent.getIntExtra("fav_page", 1);
+                favEnd = intent.getBooleanExtra("fav_end", false);
+                Logu.v("连播", "收藏夹《" + favFolderName + "》已有" + favPlaylist.size() + "个，从第" + (favIndex + 1) + "个开始");
+            }
         }
 
         return true;
@@ -801,6 +831,7 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
         }
 
         ijkPlayer.setOnCompletionListener(iMediaPlayer -> {
+            if (iMediaPlayer != ijkPlayer) return; //连播/切P时旧实例的残留回调，忽略
             finishWatching = true;
             
             if (interactionData != null && interactionData.edges != null && 
@@ -824,6 +855,8 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
                 ijkPlayer.start();
             } else if (auto_next_enabled && hasMultiplePages() && currentPageIndex < pagenames.size() - 1) {
                 switchToPage(currentPageIndex + 1);
+            } else if (favPlaylistMode) {
+                playNextFavVideo(); //收藏夹连播：自动加载列表里的下一个
             } else {
                 isPlaying = false;
                 if (hasDanmaku && mDanmakuView != null) {
@@ -2322,6 +2355,115 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
         });
     }
 
+    /**
+     * 用一个新的 PlayerData 重新装载播放器（切分P、收藏夹连播共用）
+     */
+    private void restartWithPlayerData(PlayerData playerData, String loadingTip) {
+        runOnUiThread(() -> {
+            if (destroyed)
+                return;
+
+            if (ijkPlayer != null) {
+                ijkPlayer.stop();
+                ijkPlayer.release();
+            }
+            if (mDanmakuView != null) {
+                mDanmakuView.release();
+                mDanmakuView = null;
+            }
+
+            aid = playerData.aid;
+            cid = playerData.cid;
+            video_url = playerData.videoUrl;
+            danmaku_url = playerData.danmakuUrl;
+            String shownTitle = playerData.title;
+            if (favPlaylistMode)
+                shownTitle = shownTitle + "（连播 " + (favIndex + 1) + "/" + favTotalText() + "）";
+            text_title.setText(shownTitle);
+            videoTitle = playerData.title;
+            favSwitching = false;
+
+            if (playerData.qnStrList != null && playerData.qnValueList != null) {
+                qnStrList = playerData.qnStrList;
+                qnValueList = playerData.qnValueList;
+                currentQuality = playerData.qn;
+            }
+
+            //每个视频的分P信息各不相同，连播时要一起换掉（切P时传进来的是原值，等于没变）
+            if (playerData.pagenames != null && playerData.cids != null) {
+                pagenames = playerData.pagenames;
+                cids = playerData.cids;
+                currentPageIndex = playerData.currentPageIndex;
+            }
+            if (btn_page_selector != null)
+                btn_page_selector.setVisibility(hasMultiplePages() ? View.VISIBLE : View.GONE);
+
+            loading_info.setVisibility(View.VISIBLE);
+            anim_loading.start();
+            loading_text0.setText(loadingTip);
+            isPrepared = false;
+            isPlaying = false;
+            finishWatching = false;
+            progress_history = 0;
+            subtitles = null;
+            subtitleLinks = null;
+            subtitle_selected = -1;
+            viewPoints = null;
+            viewPointAdapter = null;
+            if (btn_viewpoint != null) {
+                btn_viewpoint.setVisibility(View.GONE);
+            }
+
+            interactionData = null;
+            currentEdgeId = 0;
+            currentQuestion = null;
+            questionShown = false;
+            if (interactionChoiceLayout != null) {
+                interactionChoiceLayout.setVisibility(View.GONE);
+                interactionChoiceLayout.removeAllViews();
+            }
+
+            ijkPlayer = new IjkMediaPlayer();
+            mDanmakuView = findViewById(R.id.sv_danmaku);
+
+            setDisplay();
+
+            layout_control.postDelayed(() -> CenterThreadPool.run(() -> {
+                if (destroyed)
+                    return;
+
+                runOnUiThread(() -> {
+                    loading_text0.setText("装填弹幕中");
+                    loading_text1.setText("(≧∇≦)");
+                });
+
+                if (isOnlineVideo) {
+                    danmakuFile = new File(getCacheDir(), "danmaku.xml");
+                    if (danmakuFile.exists()) {
+                        danmakuFile.delete();
+                    }
+                    downdanmu();
+                }
+
+                if (!destroyed && SharedPreferencesUtil.getBoolean("player_subtitle_autoshow", true)) {
+                    downSubtitle(false);
+                }
+
+                if (!destroyed && isOnlineVideo && aid > 0 && cid > 0) {
+                    loadHighEnergyData();
+                }
+
+                if (!destroyed && isOnlineVideo && aid > 0 && cid > 0 && SharedPreferencesUtil.getBoolean("player_show_viewpoints", false)) {
+                    loadViewPoints();
+                }
+
+                if (!destroyed && isOnlineVideo && aid > 0 && cid > 0) {
+                    loadInteractionVideo();
+                }
+            }), 60);
+        });
+    }
+
     private void switchToPage(int pageIndex) {
         if (!hasMultiplePages() || pageIndex < 0 || pageIndex >= pagenames.size())
             return;
@@ -2353,101 +2495,108 @@ public class PlayerActivity extends Activity implements IjkMediaPlayer.OnPrepare
                     return;
                 }
 
-                runOnUiThread(() -> {
-                    if (destroyed)
-                        return;
-
-                    if (ijkPlayer != null) {
-                        ijkPlayer.stop();
-                        ijkPlayer.release();
-                    }
-                    if (mDanmakuView != null) {
-                        mDanmakuView.release();
-                        mDanmakuView = null;
-                    }
-
-                    cid = newCid;
-                    video_url = playerData.videoUrl;
-                    danmaku_url = playerData.danmakuUrl;
-                    text_title.setText(newTitle);
-                    videoTitle = newTitle;
-
-                    if (playerData.qnStrList != null && playerData.qnValueList != null) {
-                        qnStrList = playerData.qnStrList;
-                        qnValueList = playerData.qnValueList;
-                        currentQuality = playerData.qn;
-                    }
-
-                    loading_info.setVisibility(View.VISIBLE);
-                    anim_loading.start();
-                    loading_text0.setText("加载P" + (pageIndex + 1));
-                    isPrepared = false;
-                    isPlaying = false;
-                    finishWatching = false;
-                    progress_history = 0;
-                    subtitles = null;
-                    subtitleLinks = null;
-                    subtitle_selected = -1;
-                    viewPoints = null;
-                    viewPointAdapter = null;
-                    if (btn_viewpoint != null) {
-                        btn_viewpoint.setVisibility(View.GONE);
-                    }
-
-                    interactionData = null;
-                    currentEdgeId = 0;
-                    currentQuestion = null;
-                    questionShown = false;
-                    if (interactionChoiceLayout != null) {
-                        interactionChoiceLayout.setVisibility(View.GONE);
-                        interactionChoiceLayout.removeAllViews();
-                    }
-
-                    ijkPlayer = new IjkMediaPlayer();
-                    mDanmakuView = findViewById(R.id.sv_danmaku);
-
-                    setDisplay();
-
-                    layout_control.postDelayed(() -> CenterThreadPool.run(() -> {
-                        if (destroyed)
-                            return;
-
-                        runOnUiThread(() -> {
-                            loading_text0.setText("装填弹幕中");
-                            loading_text1.setText("(≧∇≦)");
-                        });
-
-                        if (isOnlineVideo) {
-                            danmakuFile = new File(getCacheDir(), "danmaku.xml");
-                            if (danmakuFile.exists()) {
-                                danmakuFile.delete();
-                            }
-                            downdanmu();
-                        }
-
-                        if (!destroyed && SharedPreferencesUtil.getBoolean("player_subtitle_autoshow", true)) {
-                            downSubtitle(false);
-                        }
-
-                        if (!destroyed && isOnlineVideo && aid > 0 && cid > 0) {
-                            loadHighEnergyData();
-                        }
-
-                        if (!destroyed && isOnlineVideo && aid > 0 && cid > 0 && SharedPreferencesUtil.getBoolean("player_show_viewpoints", false)) {
-                            loadViewPoints();
-                        }
-
-                        if (!destroyed && isOnlineVideo && aid > 0 && cid > 0) {
-                            loadInteractionVideo();
-                        }
-                    }), 60);
-                });
+                restartWithPlayerData(playerData, "加载P" + (pageIndex + 1));
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     MsgUtil.err(e);
                     MsgUtil.showMsg("切换失败");
                 });
             }
+        });
+    }
+
+    /**
+     * 收藏夹连播：播放下一个视频；当前页播完会自动拉下一页
+     */
+    private void playNextFavVideo() {
+        if (favPlaylist == null || favSwitching) return;
+        favSwitching = true;
+        MsgUtil.showMsg("准备播放下一个…");
+
+        //连播不经过 JumpToPlayerActivity 的退出上报，这里顺手把看完的这一集补上
+        final long lastAid = aid, lastCid = cid;
+        final long lastProgress = (ijkPlayer != null ? ijkPlayer.getDuration() : 0) / 1000;
+        CenterThreadPool.run(() -> {
+            try {
+                HistoryApi.reportHistory(lastAid, lastCid, lastProgress);
+            } catch (Exception ignored) {
+            }
+        });
+
+        CenterThreadPool.run(() -> {
+            try {
+                int target = favIndex + 1;
+                while (true) {
+                    if (target >= favPlaylist.size()) {
+                        if (favEnd) {
+                            finishFavPlaylist();
+                            return;
+                        }
+                        int lastSize = favPlaylist.size();
+                        int result = FavoriteApi.getFolderVideos(favMid, favFid, favPage + 1, favPlaylist);
+                        if (result == 1) favEnd = true;
+                        if (result == -1 || favPlaylist.size() <= lastSize) {
+                            finishFavPlaylist();
+                            return;
+                        }
+                        favPage++;
+                        continue;
+                    }
+
+                    VideoCard card = favPlaylist.get(target);
+                    //图文/失效条目没有可播的aid，直接跳过
+                    if (card == null || card.aid <= 0 || !"video".equals(card.type)) {
+                        target++;
+                        continue;
+                    }
+
+                    if (playFavCard(target, card)) return;
+                    target++; //这一个拿不到播放地址（如仅大会员），跳到下一个
+                }
+            } catch (Exception e) {
+                Logu.e("连播", "下一个加载失败：" + e.getMessage());
+                finishFavPlaylist();
+            }
+        });
+    }
+
+    private boolean playFavCard(int index, VideoCard card) {
+        try {
+            VideoInfo info = VideoInfoApi.getVideoInfo(card.aid);
+            if (info == null || info.cids == null || info.cids.isEmpty()) return false;
+
+            PlayerData playerData = info.toPlayerData(0);
+            playerData.qn = currentQuality > 0 ? currentQuality : SharedPreferencesUtil.getInt("play_qn", 16);
+            playerData.progress = 0;
+
+            PlayerApi.getVideo(playerData, false);
+            if (playerData.videoUrl == null || playerData.videoUrl.isEmpty()) return false;
+
+            favIndex = index;
+            restartWithPlayerData(playerData, "连播 " + (index + 1) + "/" + favTotalText());
+            return true;
+        } catch (Exception e) {
+            Logu.e("连播", "取 " + card.aid + " 的播放地址失败：" + e.getMessage());
+            return false;
+        }
+    }
+
+    private String favTotalText() {
+        if (favPlaylist == null) return "?";
+        return favEnd ? String.valueOf(favPlaylist.size()) : (favPlaylist.size() + "+");
+    }
+
+    private void finishFavPlaylist() {
+        favSwitching = false;
+        Logu.v("连播", "播放到末尾");
+        runOnUiThread(() -> {
+            if (destroyed) return;
+            MsgUtil.showMsg("收藏夹已播放完毕");
+            isPlaying = false;
+            if (hasDanmaku && mDanmakuView != null) mDanmakuView.pause();
+            btn_control.setImageResource(R.drawable.btn_player_play);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && mediaSession != null)
+                updateMediaSessionPlaybackState();
         });
     }
 
